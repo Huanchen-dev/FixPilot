@@ -1,76 +1,125 @@
-"""AgentCenter 的第一个 LangGraph 双路工作流。"""
+"""AgentCenter的LangGraph路由与双Agent工作流。"""
 
 from typing import Annotated, Literal, TypedDict
 
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.graph.message import add_messages
-from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
 
-from app.config import CHAT_BASE_URL, CHAT_MODEL, DASHSCOPE_API_KEY
+from app.a2a_client import knowledge_a2a_client
+from app.model_provider import get_chat_model, get_router_model
+from app.schemas import Intent
 
 
 class AgentState(TypedDict, total=False):
     """一次请求在图中流转时携带的数据。"""
 
     messages: Annotated[list[BaseMessage], add_messages]
-    intent: Literal["chat", "knowledge"]
+    intent: Intent
     response: str
+    thread_id: str
+    source: str
 
 
-# 模型客户端只创建一次，后续每个聊天请求都复用这个对象。
-chat_model = ChatOpenAI(
-    model=CHAT_MODEL,
-    api_key=DASHSCOPE_API_KEY,
-    base_url=CHAT_BASE_URL,
-    temperature=0.2,
-)
+def _latest_message(state: AgentState) -> str:
+    return str(state["messages"][-1].content)
 
 
-def router_node(state: AgentState) -> dict[str, str]:
-    """根据用户输入设置意图；这里只负责选择路线，不负责回答。"""
+def _fallback_intent(message: str) -> Intent:
+    """模型路由不可用时保留确定性的最低可用分流。"""
 
-    message = str(state["messages"][-1].content)
-    knowledge_keywords = ("知识库", "RAG", "检索", "面试题", "原理")
-    intent = "knowledge" if any(keyword in message for keyword in knowledge_keywords) else "chat"
-    return {"intent": intent}
-
-
-def chat_agent_node(state: AgentState) -> dict[str, object]:
-    """普通交流路线：调用大模型，并把文本回答写回State。"""
-
-    model_response = chat_model.invoke(
-        [
-            SystemMessage(content="你是AgentCenter的通用聊天助手，请简洁、准确地回答。"),
-            *state["messages"],
-        ]
+    knowledge_keywords = (
+        "知识库",
+        "RAG",
+        "检索",
+        "面试题",
+        "原理",
+        "向量",
+        "LangChain",
+        "LangGraph",
     )
+    return (
+        "knowledge"
+        if any(keyword.lower() in message.lower() for keyword in knowledge_keywords)
+        else "chat"
+    )
+
+
+async def router_node(state: AgentState) -> dict[str, str]:
+    """优先使用模型结构化路由，失败时回退到关键词规则。"""
+
+    message = _latest_message(state)
+    try:
+        decision = await get_router_model().ainvoke(
+            [
+                SystemMessage(
+                    content=(
+                        "你只负责路由，不回答问题。"
+                        "普通问候、闲聊、写作、翻译、通用任务选择chat；"
+                        "明确询问编程面试知识、AI开发原理、项目笔记或RAG资料"
+                        "时选择knowledge。无法确定时选择chat。"
+                        "示例：'你好'选chat，'帮我写一句问候'选chat，"
+                        "'什么是RAG'选knowledge，'解释Java事务原理'选knowledge。"
+                    )
+                ),
+                state["messages"][-1],
+            ]
+        )
+        return {"intent": decision.intent}
+    except Exception:
+        return {"intent": _fallback_intent(message)}
+
+
+async def chat_agent_node(state: AgentState) -> dict[str, object]:
+    """普通聊天路线直接调用Qwen，并明确覆盖本轮source。"""
+
+    try:
+        model_response = await get_chat_model().ainvoke(
+            [
+                SystemMessage(
+                    content="你是AgentCenter的通用聊天助手，请简洁、准确地回答。"
+                ),
+                *state["messages"],
+            ]
+        )
+        response = str(model_response.content)
+        message: BaseMessage = model_response
+        source = "CHAT"
+    except Exception:
+        response = "聊天模型暂时不可用，请检查模型配置后重试。"
+        message = AIMessage(content=response)
+        source = "CHAT_UNAVAILABLE"
+
     return {
-        "messages": [model_response],
-        "response": str(model_response.content),
+        "messages": [message],
+        "response": response,
+        "source": source,
     }
 
 
-def knowledge_agent_node(state: AgentState) -> dict[str, object]:
-    """知识问答路线的占位节点，后续会在这里接入RAG Agent。"""
+async def knowledge_agent_node(state: AgentState) -> dict[str, object]:
+    """通过A2A协议调用独立Knowledge Agent。"""
 
-    message = str(state["messages"][-1].content)
-    response = f"Knowledge Agent占位处理：{message}"
+    result = await knowledge_a2a_client.query(
+        _latest_message(state),
+        state.get("thread_id", "agent-default"),
+    )
     return {
-        "messages": [{"role": "assistant", "content": response}],
-        "response": response,
+        "messages": [AIMessage(content=result.answer)],
+        "response": result.answer,
+        "source": result.source,
     }
 
 
 def choose_next_node(state: AgentState) -> Literal["chat_agent", "knowledge_agent"]:
-    """把State中的意图转换为图中下一个节点的名称。"""
+    """把State中的意图转换为图中下一个节点名称。"""
 
     return "knowledge_agent" if state["intent"] == "knowledge" else "chat_agent"
 
 
 def build_graph():
-    """组装并编译一次工作流，供API请求重复复用。"""
+    """组装并编译工作流，供API请求重复复用。"""
 
     builder = StateGraph(AgentState)
     builder.add_node("router", router_node)
