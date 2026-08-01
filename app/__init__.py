@@ -1,2 +1,1 @@
-"""AgentCenter application package."""
-
+"""FixPilot application package."""

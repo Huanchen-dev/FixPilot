@@ -1,141 +1,101 @@
-"""AgentCenter的FastAPI统一入口。"""
+"""FixPilot的FastAPI诊断入口与SSE进度事件。"""
 
 import json
 from collections.abc import AsyncIterator
+from uuid import uuid4
 
 from fastapi import FastAPI
-from langchain_core.messages import HumanMessage
 from starlette.responses import StreamingResponse
 
-from app.graph import agent_graph
-from app.schemas import ChatRequest, ChatResponse
+from app.graph import diagnosis_graph
+from app.schemas import DiagnosisRequest, DiagnosisResponse
 
 
 app = FastAPI(
-    title="AgentCenter",
-    description="基于LangGraph、A2A与MCP的智能路由协同服务",
+    title="FixPilot",
+    description="面向Python/AI应用项目的智能故障诊断系统",
     version="1.0.0",
 )
+
+STAGE_LABELS = {
+    "parse_traceback": "解析Traceback",
+    "collect_evidence": "收集仓库证据",
+    "analyze": "分析根因候选",
+    "build_report": "生成诊断报告",
+}
 
 
 @app.get("/health", summary="服务健康检查")
 def health_check() -> dict[str, str]:
-    """返回最小健康状态，用于确认FastAPI服务已经正常启动。"""
-
-    return {
-        "status": "ok",
-        "service": "AgentCenter",
-    }
+    return {"status": "ok", "service": "fixpilot"}
 
 
-@app.post("/chat", response_model=ChatResponse, summary="执行路由工作流")
-async def chat(request: ChatRequest) -> ChatResponse:
-    """把请求交给LangGraph，并返回统一结果。"""
-
-    final_state = await agent_graph.ainvoke(
-        {
-            "messages": [HumanMessage(content=request.message)],
-            "thread_id": request.thread_id,
-        },
-        config={"configurable": {"thread_id": request.thread_id}},
+@app.post(
+    "/diagnose",
+    response_model=DiagnosisResponse,
+    summary="执行一次只读故障诊断",
+)
+async def diagnose(request: DiagnosisRequest) -> DiagnosisResponse:
+    diagnosis_id = uuid4().hex
+    final_state = await diagnosis_graph.ainvoke(
+        {"diagnosis_id": diagnosis_id, "request": request}
     )
-    return ChatResponse(
-        intent=final_state["intent"],
-        response=final_state["response"],
-        source=final_state["source"],
-        thread_id=request.thread_id,
+    return DiagnosisResponse(
+        diagnosis_id=diagnosis_id,
+        report=final_state["report"],
     )
 
 
 def sse_event(event: str, data: dict[str, object]) -> str:
-    """把一个事件编码成SSE要求的文本格式。"""
-
     payload = json.dumps(data, ensure_ascii=False)
     return f"event: {event}\ndata: {payload}\n\n"
 
 
-async def stream_chat_events(request: ChatRequest) -> AsyncIterator[str]:
-    """把LangGraph事件转换成稳定的SSE事件契约。"""
+async def stream_diagnosis_events(
+    request: DiagnosisRequest,
+) -> AsyncIterator[str]:
+    """逐节点发送诊断进度，最终发送完整结构化报告。"""
 
-    config = {"configurable": {"thread_id": request.thread_id}}
-    yield sse_event("start", {"thread_id": request.thread_id})
-    emitted_token = False
-    emitted_message = False
-    intent = "chat"
-    source = "CHAT"
-
+    diagnosis_id = uuid4().hex
+    yield sse_event("start", {"diagnosis_id": diagnosis_id})
+    state: dict[str, object] = {
+        "diagnosis_id": diagnosis_id,
+        "request": request,
+    }
     try:
-        async for event in agent_graph.astream_events(
-            {
-                "messages": [HumanMessage(content=request.message)],
-                "thread_id": request.thread_id,
-            },
-            config=config,
-            version="v2",
+        async for update in diagnosis_graph.astream(
+            state,
+            stream_mode="updates",
         ):
-            metadata = event.get("metadata", {})
-            node = metadata.get("langgraph_node") or event.get("name")
-
-            if event["event"] == "on_chain_end" and node == "router":
-                output = event["data"].get("output", {})
-                if isinstance(output, dict) and output.get("intent"):
-                    intent = str(output["intent"])
-                    yield sse_event("route", {"intent": intent})
-
-            elif (
-                event["event"] == "on_chat_model_stream"
-                and node == "chat_agent"
-            ):
-                content = event["data"]["chunk"].content
-                if isinstance(content, str) and content:
-                    emitted_token = True
-                    source = "CHAT"
-                    yield sse_event(
-                        "token",
-                        {"content": content, "source": source},
-                    )
-
-            elif event["event"] == "on_chain_end" and node in {
-                "chat_agent",
-                "knowledge_agent",
-            }:
-                output = event["data"].get("output", {})
-                if not isinstance(output, dict):
-                    continue
-                response = output.get("response")
-                source = str(output.get("source", source))
-                should_emit_message = node == "knowledge_agent" or not emitted_token
-                if response and should_emit_message and not emitted_message:
-                    emitted_message = True
-                    yield sse_event(
-                        "message",
-                        {
-                            "content": response,
-                            "source": output.get("source", "RAG"),
-                        },
-                    )
-
-        yield sse_event(
-            "done",
-            {
-                "intent": intent,
-                "source": source,
-                "streamed": emitted_token,
-            },
-        )
-    except Exception:
+            for node_name, output in update.items():
+                if isinstance(output, dict):
+                    state.update(output)
+                yield sse_event(
+                    "stage",
+                    {
+                        "name": node_name,
+                        "label": STAGE_LABELS.get(node_name, node_name),
+                    },
+                )
+        report = state.get("report")
+        if report is None:
+            raise RuntimeError("诊断工作流没有生成报告。")
+        yield sse_event("report", {"report": report.model_dump()})
+        yield sse_event("done", {"diagnosis_id": diagnosis_id})
+    except Exception as exc:
         yield sse_event(
             "error",
-            {"message": "AgentCenter处理失败，请检查服务状态后重试。"},
+            {
+                "diagnosis_id": diagnosis_id,
+                "message": f"FixPilot诊断失败：{type(exc).__name__}",
+            },
         )
 
 
-@app.post("/chat/stream", summary="以SSE流式执行路由工作流")
-async def chat_stream(request: ChatRequest) -> StreamingResponse:
-    """返回持续发送SSE事件的响应，而不是等待完整答案。"""
-
+@app.post("/diagnose/stream", summary="以SSE返回诊断进度和报告")
+async def diagnose_stream(request: DiagnosisRequest) -> StreamingResponse:
     return StreamingResponse(
-        stream_chat_events(request),
+        stream_diagnosis_events(request),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
