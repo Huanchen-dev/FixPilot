@@ -1,4 +1,4 @@
-"""AgentCenter主图调用Knowledge Agent的A2A Client。"""
+"""FixPilot主Graph调用Repository Inspector Agent的A2A Client。"""
 
 import hashlib
 import json
@@ -12,31 +12,32 @@ from a2a.helpers.proto_helpers import (
 )
 from a2a.types import Role, SendMessageConfiguration, SendMessageRequest
 
-from app.config import KNOWLEDGE_AGENT_BASE_URL, KNOWLEDGE_AGENT_TIMEOUT
-from app.schemas import KnowledgeResult
+from app.config import INSPECTOR_AGENT_BASE_URL, INSPECTOR_AGENT_TIMEOUT
+from app.schemas import InspectionRequest, InspectionResult
 
 
-class KnowledgeA2AClient:
-    """发现Knowledge Agent并通过A2A消息取得结构化结果。"""
+class InspectorA2AClient:
+    """发现Inspector Agent，并取得结构化的只读仓库证据。"""
 
-    async def query(self, question: str, thread_id: str) -> KnowledgeResult:
-        context_id = hashlib.md5(thread_id.encode("utf-8")).hexdigest()
+    async def inspect(
+        self,
+        request: InspectionRequest,
+        diagnosis_id: str,
+    ) -> InspectionResult:
+        context_id = hashlib.md5(diagnosis_id.encode("utf-8")).hexdigest()
         try:
             async with httpx.AsyncClient(
-                timeout=KNOWLEDGE_AGENT_TIMEOUT,
+                timeout=INSPECTOR_AGENT_TIMEOUT,
                 trust_env=False,
             ) as http_client:
                 factory = ClientFactory(
-                    ClientConfig(
-                        streaming=False,
-                        httpx_client=http_client,
-                    )
+                    ClientConfig(streaming=False, httpx_client=http_client)
                 )
-                client = await factory.create_from_url(KNOWLEDGE_AGENT_BASE_URL)
+                client = await factory.create_from_url(INSPECTOR_AGENT_BASE_URL)
                 try:
-                    request = SendMessageRequest(
+                    message_request = SendMessageRequest(
                         message=new_text_message(
-                            question,
+                            request.model_dump_json(),
                             role=Role.ROLE_USER,
                             context_id=context_id,
                         ),
@@ -45,7 +46,7 @@ class KnowledgeA2AClient:
                         ),
                     )
                     payload_text = ""
-                    async for response in client.send_message(request):
+                    async for response in client.send_message(message_request):
                         payload_text = get_stream_response_text(response)
                         if (
                             not payload_text
@@ -59,19 +60,19 @@ class KnowledgeA2AClient:
                     await client.close()
 
             if not payload_text:
-                raise ValueError("A2A Agent没有返回结果。")
-            return KnowledgeResult.model_validate(json.loads(payload_text))
+                raise ValueError("Repository Inspector Agent没有返回结果。")
+            return InspectionResult.model_validate(json.loads(payload_text))
         except (
             A2AClientError,
             httpx.HTTPError,
             json.JSONDecodeError,
             ValueError,
             RuntimeError,
-        ):
-            return KnowledgeResult(
-                answer="Knowledge Agent暂时不可用，请稍后重试。",
-                source="RAG_UNAVAILABLE",
+        ) as exc:
+            return InspectionResult(
+                status="error",
+                warnings=[f"仓库检查Agent不可用：{type(exc).__name__}"],
             )
 
 
-knowledge_a2a_client = KnowledgeA2AClient()
+inspector_a2a_client = InspectorA2AClient()

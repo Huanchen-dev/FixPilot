@@ -1,4 +1,4 @@
-"""Knowledge Agent内部使用的MCP Client。"""
+"""Repository Inspector Agent内部使用的持久stdio MCP Client。"""
 
 import asyncio
 import json
@@ -12,11 +12,17 @@ from mcp.client.stdio import stdio_client
 from mcp.types import TextContent
 
 from app.config import PROJECT_ROOT
-from app.schemas import KnowledgeResult
+REQUIRED_TOOLS = {
+    "list_project_files",
+    "read_source_file",
+    "search_code",
+    "read_dependency_manifest",
+    "get_python_environment",
+}
 
 
-class McpKnowledgeClient:
-    """维护一条stdio MCP会话，发现并调用知识库工具。"""
+class McpInspectorClient:
+    """维护stdio会话，只负责发现和执行MCP工具。"""
 
     def __init__(self) -> None:
         self._stack: AsyncExitStack | None = None
@@ -26,11 +32,9 @@ class McpKnowledgeClient:
     async def start(self) -> None:
         if self._session is not None:
             return
-
         async with self._start_lock:
             if self._session is not None:
                 return
-
             stack = AsyncExitStack()
             try:
                 read_stream, write_stream = await stack.enter_async_context(
@@ -48,33 +52,29 @@ class McpKnowledgeClient:
                 )
                 await session.initialize()
                 tools = await session.list_tools()
-                if not any(tool.name == "query_knowledge_base" for tool in tools.tools):
-                    raise RuntimeError("MCP Server未提供query_knowledge_base工具。")
+                available = {tool.name for tool in tools.tools}
+                missing = sorted(REQUIRED_TOOLS - available)
+                if missing:
+                    raise RuntimeError(f"MCP Server缺少工具：{', '.join(missing)}")
             except Exception:
                 await stack.aclose()
                 raise
-
             self._stack = stack
             self._session = session
 
-    async def query(self, question: str, session_id: str) -> KnowledgeResult:
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
         await self.start()
         if self._session is None:
             raise RuntimeError("MCP Client尚未建立连接。")
-
-        try:
-            result = await self._session.call_tool(
-                "query_knowledge_base",
-                {
-                    "question": question,
-                    "session_id": session_id,
-                },
-            )
-        except Exception:
-            await self.close()
-            raise
+        result = await self._session.call_tool(name, arguments)
         payload = self._extract_payload(result.structuredContent, result.content)
-        return KnowledgeResult.model_validate(payload)
+        if getattr(result, "isError", False):
+            raise RuntimeError(str(payload))
+        return payload
 
     async def close(self) -> None:
         if self._stack is not None:
@@ -93,7 +93,6 @@ class McpKnowledgeClient:
             ):
                 return structured_content["result"]
             return structured_content
-
         text = "\n".join(
             item.text for item in content if isinstance(item, TextContent)
         )

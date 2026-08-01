@@ -1,0 +1,38 @@
+[
+  {
+    "id": "missing-module",
+    "traceback": "Traceback (most recent call last):\n  File \"app/main.py\", line 3, in <module>\n    import pymilvus\nModuleNotFoundError: No module named 'pymilvus'",
+    "expected_title_keyword": "缺少",
+    "expected_category": "missing_dependency"
+  },
+  {
+    "id": "package-api-mismatch",
+    "traceback": "ImportError: cannot import name 'OldClient' from 'demo_sdk'",
+    "expected_title_keyword": "不兼容",
+    "expected_category": "version_incompatibility"
+  },
+  {
+    "id": "missing-api-key",
+    "traceback": "RuntimeError: 未配置API_KEY environment variable",
+    "expected_title_keyword": "环境变量",
+    "expected_category": "missing_configuration"
+  },
+  {
+    "id": "service-unavailable",
+    "traceback": "httpx.ConnectError: [WinError 10061] Connection refused",
+    "expected_title_keyword": "依赖服务",
+    "expected_category": "service_unavailable"
+  },
+  {
+    "id": "milvus-lock",
+    "traceback": "milvus_lite.exceptions.DataDirLockedError: another process holds the lock on 'milvus_data.db'",
+    "expected_title_keyword": "占用",
+    "expected_category": "resource_lock"
+  },
+  {
+    "id": "nested-event-loop",
+    "traceback": "RuntimeError: asyncio.run() cannot be called from a running event loop",
+    "expected_title_keyword": "事件循环",
+    "expected_category": "async_runtime"
+  }
+]

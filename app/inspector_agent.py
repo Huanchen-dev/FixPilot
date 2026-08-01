@@ -1,4 +1,4 @@
-"""通过A2A协议提供知识库问答能力的独立Agent服务。"""
+"""通过A2A协议提供只读仓库证据收集能力的独立Agent。"""
 
 import json
 from contextlib import asynccontextmanager
@@ -23,18 +23,21 @@ from a2a.types import (
 from a2a.utils.constants import PROTOCOL_VERSION_1_0, TransportProtocol
 from fastapi import FastAPI
 
-from app.config import KNOWLEDGE_AGENT_BASE_URL
-from app.mcp_client import McpKnowledgeClient
+from app.config import INSPECTOR_AGENT_BASE_URL
+from app.mcp_client import McpInspectorClient
+from app.repository_inspector import RepositoryInspector
+from app.schemas import InspectionRequest
 
 
-mcp_knowledge_client = McpKnowledgeClient()
+mcp_inspector_client = McpInspectorClient()
+repository_inspector = RepositoryInspector(mcp_inspector_client)
 
 
-class KnowledgeAgentExecutor(AgentExecutor):
-    """把A2A任务转交给MCP知识库工具。"""
+class RepositoryInspectorExecutor(AgentExecutor):
+    """把A2A检查任务交给受限的仓库取证Agent。"""
 
-    def __init__(self, mcp_client: McpKnowledgeClient) -> None:
-        self.mcp_client = mcp_client
+    def __init__(self, inspector: RepositoryInspector) -> None:
+        self.inspector = inspector
 
     async def execute(
         self,
@@ -53,20 +56,20 @@ class KnowledgeAgentExecutor(AgentExecutor):
         updater = TaskUpdater(event_queue, context.task_id, context.context_id)
         await updater.start_work()
         try:
-            result = await self.mcp_client.query(
-                context.get_user_input(),
-                context.context_id,
+            request = InspectionRequest.model_validate_json(
+                context.get_user_input()
             )
+            result = await self.inspector.inspect(request)
             payload = json.dumps(result.model_dump(), ensure_ascii=False)
             await updater.add_artifact(
                 [new_text_part(payload, media_type="application/json")],
-                name="knowledge-answer",
+                name="repository-evidence",
             )
             await updater.complete()
         except Exception:
             await updater.failed(
                 updater.new_agent_message(
-                    [new_text_part("Knowledge Agent调用失败，请稍后重试。")]
+                    [new_text_part("Repository Inspector执行失败，请检查输入与服务状态。")]
                 )
             )
 
@@ -84,32 +87,32 @@ class KnowledgeAgentExecutor(AgentExecutor):
 
 
 agent_card = AgentCard(
-    name="AgentCenter Knowledge Agent",
-    description="通过MCP调用项目一RAG服务，回答编程面试知识问题。",
+    name="FixPilot Repository Inspector",
+    description="自主选择MCP只读工具，收集Python项目的代码、依赖和环境证据。",
     supported_interfaces=[
         AgentInterface(
-            url=f"{KNOWLEDGE_AGENT_BASE_URL.rstrip('/')}/a2a",
+            url=f"{INSPECTOR_AGENT_BASE_URL.rstrip('/')}/a2a",
             protocol_binding=TransportProtocol.JSONRPC,
             protocol_version=PROTOCOL_VERSION_1_0,
         )
     ],
     version="1.0.0",
     capabilities=AgentCapabilities(streaming=False),
-    default_input_modes=["text/plain"],
+    default_input_modes=["application/json"],
     default_output_modes=["application/json"],
     skills=[
         AgentSkill(
-            id="programming-interview-knowledge",
-            name="编程面试知识库问答",
-            description="检索项目一知识库并返回有来源标记的答案。",
-            tags=["RAG", "编程面试", "知识库"],
-            examples=["解释BGE-M3的稠密向量与稀疏向量。"],
+            id="python-repository-inspection",
+            name="Python仓库只读检查",
+            description="受限循环检查代码与依赖，并返回取证轨迹和结构化证据。",
+            tags=["Python", "Traceback", "只读检查", "故障诊断"],
+            examples=["根据ModuleNotFoundError收集相关源码和依赖证据。"],
         )
     ],
 )
 
 request_handler = DefaultRequestHandler(
-    agent_executor=KnowledgeAgentExecutor(mcp_knowledge_client),
+    agent_executor=RepositoryInspectorExecutor(repository_inspector),
     task_store=InMemoryTaskStore(),
     agent_card=agent_card,
 )
@@ -117,21 +120,26 @@ request_handler = DefaultRequestHandler(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    yield
-    await mcp_knowledge_client.close()
+    # MCP 的 stdio 上下文必须由同一个 asyncio task 负责进入和退出。
+    # 因此连接跟随应用生命周期建立，不能等到某个 A2A 请求里再懒启动。
+    await mcp_inspector_client.start()
+    try:
+        yield
+    finally:
+        await mcp_inspector_client.close()
 
 
 app = FastAPI(
-    title="AgentCenter Knowledge Agent",
-    description="A2A知识库Agent服务",
+    title="FixPilot Repository Inspector",
+    description="A2A只读仓库证据Agent",
     version="1.0.0",
     lifespan=lifespan,
 )
 
 
-@app.get("/health", summary="Knowledge Agent健康检查")
+@app.get("/health", summary="Inspector Agent健康检查")
 def health_check() -> dict[str, str]:
-    return {"status": "ok", "service": "knowledge-agent"}
+    return {"status": "ok", "service": "repository-inspector"}
 
 
 add_a2a_routes_to_fastapi(
