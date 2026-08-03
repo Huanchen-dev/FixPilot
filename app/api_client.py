@@ -51,3 +51,36 @@ def stream_diagnosis(
                     data_lines.append(line.removeprefix("data:").strip())
             if data_lines:
                 yield event_name, json.loads("\n".join(data_lines))
+
+
+def generate_repair(
+    repository_path: str,
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    """请求后端在临时副本中完成生成、测试和最多两轮调整。"""
+
+    with requests.Session() as session:
+        session.trust_env = False
+        response = session.post(
+            f"{FIXPILOT_API_BASE_URL.rstrip('/')}/repair/generate",
+            json={"repository_path": repository_path, "report": report},
+            timeout=(5, 600),
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+def finish_repair(repair_id: str, action: str) -> dict[str, Any]:
+    """最终应用或拒绝后端持有的修复候选。"""
+
+    if action not in {"apply", "reject"}:
+        raise ValueError("不支持的修复操作。")
+    with requests.Session() as session:
+        session.trust_env = False
+        response = session.post(
+            f"{FIXPILOT_API_BASE_URL.rstrip('/')}/repair/{action}",
+            json={"repair_id": repair_id},
+            timeout=(5, 120),
+        )
+        response.raise_for_status()
+        return response.json()

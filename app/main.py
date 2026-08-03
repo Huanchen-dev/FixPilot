@@ -8,13 +8,21 @@ from fastapi import FastAPI
 from starlette.responses import StreamingResponse
 
 from app.graph import diagnosis_graph
-from app.schemas import DiagnosisRequest, DiagnosisResponse
+from app.repair_service import repair_service
+from app.schemas import (
+    DiagnosisRequest,
+    DiagnosisResponse,
+    RepairApplyRequest,
+    RepairApplyResponse,
+    RepairGenerateRequest,
+    RepairGenerateResponse,
+)
 
 
 app = FastAPI(
     title="FixPilot",
     description="面向Python/AI应用项目的智能故障诊断系统",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 STAGE_LABELS = {
@@ -99,3 +107,32 @@ async def diagnose_stream(request: DiagnosisRequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
+
+
+@app.post(
+    "/repair/generate",
+    response_model=RepairGenerateResponse,
+    summary="在临时副本中生成并验证安全修复候选",
+)
+async def generate_repair(
+    request: RepairGenerateRequest,
+) -> RepairGenerateResponse:
+    return await repair_service.generate(request)
+
+
+@app.post(
+    "/repair/apply",
+    response_model=RepairApplyResponse,
+    summary="人工确认后将已验证候选安全应用到原仓库",
+)
+async def apply_repair(request: RepairApplyRequest) -> RepairApplyResponse:
+    return await repair_service.apply(request.repair_id)
+
+
+@app.post(
+    "/repair/reject",
+    response_model=RepairApplyResponse,
+    summary="拒绝修复候选并清理临时副本",
+)
+async def reject_repair(request: RepairApplyRequest) -> RepairApplyResponse:
+    return await repair_service.reject(request.repair_id)
