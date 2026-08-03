@@ -9,7 +9,7 @@ from app.config import (
     DIAGNOSIS_BASE_URL,
     DIAGNOSIS_MODEL,
 )
-from app.schemas import DiagnosisDraft
+from app.schemas import DiagnosisDraft, RepairProposal
 
 
 def _require_api_key() -> None:
@@ -43,3 +43,10 @@ def get_inspector_model():
     """返回可绑定仓库工具的Inspector决策模型。"""
 
     return get_base_model()
+
+
+@lru_cache(maxsize=1)
+def get_repair_model():
+    """返回精确文本替换契约；Agent再物化为冻结RepairPlan。"""
+
+    return get_base_model().with_structured_output(RepairProposal)

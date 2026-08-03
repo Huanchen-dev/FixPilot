@@ -4,6 +4,8 @@ from app import main
 from app.schemas import (
     DiagnosisReport,
     EvidenceItem,
+    RepairApplyResponse,
+    RepairGenerateResponse,
     RootCause,
     TracebackInfo,
 )
@@ -60,6 +62,31 @@ class FakeGraph:
         yield {"build_report": {"report": report}}
 
 
+class FakeRepairService:
+    async def generate(self, request):
+        return RepairGenerateResponse(
+            repair_id="repair-api-test",
+            diagnosis_id=request.report.diagnosis_id,
+            status="not_repairable",
+            repairable_reason="测试策略拒绝",
+        )
+
+    async def apply(self, repair_id):
+        return RepairApplyResponse(
+            repair_id=repair_id,
+            status="applied",
+            applied_files=["app.py"],
+            message="测试应用成功",
+        )
+
+    async def reject(self, repair_id):
+        return RepairApplyResponse(
+            repair_id=repair_id,
+            status="rejected",
+            message="测试拒绝成功",
+        )
+
+
 def test_health_and_diagnose(monkeypatch):
     monkeypatch.setattr(main, "diagnosis_graph", FakeGraph())
     with TestClient(main.app) as client:
@@ -93,3 +120,25 @@ def test_sse_contract(monkeypatch):
     assert "event: report" in response.text
     assert "event: done" in response.text
     assert '"title": "测试根因"' in response.text
+
+
+def test_repair_generate_apply_and_reject_contract(monkeypatch):
+    monkeypatch.setattr(main, "repair_service", FakeRepairService())
+    report = sample_report().model_dump()
+    with TestClient(main.app) as client:
+        generated = client.post(
+            "/repair/generate",
+            json={"repository_path": r"D:\demo", "report": report},
+        )
+        applied = client.post(
+            "/repair/apply",
+            json={"repair_id": "repair-api-test"},
+        )
+        rejected = client.post(
+            "/repair/reject",
+            json={"repair_id": "repair-api-test"},
+        )
+    assert generated.status_code == 200
+    assert generated.json()["status"] == "not_repairable"
+    assert applied.json()["applied_files"] == ["app.py"]
+    assert rejected.json()["status"] == "rejected"

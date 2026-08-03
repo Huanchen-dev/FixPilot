@@ -4,4 +4,5 @@ __pycache__/
 .env
 .idea/
 .pytest_cache/
-
+.fixpilot-e2e/
+.playwright-cli/
